@@ -95,9 +95,20 @@
   .code-box.on{background:var(--accent2);border-color:var(--accent2);color:#fff;}
   .code-cell:hover .code-box{border-color:var(--accent);}
   .straord-cell{display:flex;flex-direction:column;gap:3px;align-items:center;}
+  .straord-hm{display:flex;gap:3px;align-items:center;}
+  .straord-hm input[type=number]{width:40px;}
+  .straord-hm span{font-size:10px;color:var(--muted);}
   .status{font-size:11px;color:var(--muted);margin-top:8px;flex-shrink:0;}
   .status.saved{color:var(--green);}
   .status.err{color:var(--red);}
+
+  .tabs{display:flex;gap:2px;border-bottom:1px solid var(--border);flex-shrink:0;padding:0 22px;background:var(--panel);}
+  .tab{padding:10px 16px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:13px;font-weight:600;}
+  .tab.active{color:var(--accent);border-bottom-color:var(--accent);}
+  .riep-table td{text-align:left;}
+  .riep-table td:not(:first-child){text-align:center;}
+  .saldo-pos{color:var(--green);}
+  .saldo-neg{color:var(--red);}
 
   button.primary{background:var(--accent2);border:none;color:#fff;font-weight:600;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap;}
   button.primary:hover{background:var(--accent);}
@@ -135,7 +146,12 @@
     </div>
   </div>
 
-  <div class="content">
+  <div class="tabs">
+    <div class="tab active" data-tab="dettaglio">Dettaglio</div>
+    <div class="tab" data-tab="riepilogo">Riepilogo</div>
+  </div>
+
+  <div class="content" id="content-dettaglio">
     <div class="legend">
       <span><b>331</b> Galleria</span>
       <span><b>338</b> FF</span>
@@ -168,6 +184,21 @@
       </table>
     </div>
     <div class="status" id="saveStatus">Le modifiche vengono salvate automaticamente su Firebase.</div>
+  </div>
+
+  <div class="content hidden" id="content-riepilogo">
+    <div class="summary-row" id="riepilogoCards"></div>
+    <div class="legend" style="margin-top:4px;">
+      <b>Conteggio turni</b> — mese selezionato in alto
+    </div>
+    <div class="table-wrap">
+      <table class="riep-table">
+        <thead>
+          <tr><th>Turno</th><th>Volte nel mese</th></tr>
+        </thead>
+        <tbody id="tbodyTurniRiepilogo"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -254,7 +285,7 @@ const TURNI = [
   "G","Riposo","Scomputo"
 ];
 const ASSENZE = ["","Ferie","Malattia","Permesso"];
-const STRAORD_TIPI = ["","Straordinario","Scomputo"];
+const STRAORD_TIPI = ["","Straordinario","Scomputo maturato","Scomputo utilizzato"];
 const CODICI = [
   {key:'cod331', label:'331'},
   {key:'cod338', label:'338'},
@@ -270,6 +301,7 @@ let oreCache = {};  // { "YYYY-MM-DD": {...record} }
 const now = new Date();
 let currentMese = now.getMonth();
 let currentAnno = now.getFullYear();
+let currentTab = 'dettaglio';
 
 function calcOre(inizio, fine){
   if(!inizio || !fine) return 0;
@@ -282,6 +314,23 @@ function calcOre(inizio, fine){
 function fmtOre(v){ return v ? v.toFixed(2) : "0.00"; }
 function pad(n){ return n.toString().padStart(2,'0'); }
 function daysInMonth(mese, anno){ return new Date(anno, mese+1, 0).getDate(); }
+
+// Ore decimali di straordinario/scomputo, da campi ore+minuti separati.
+// Fallback sul vecchio campo decimale "straordinarioOre" per dati salvati in precedenza.
+function straordDecimal(rec){
+  if(rec.straordinarioH !== undefined || rec.straordinarioM !== undefined){
+    const h = parseInt(rec.straordinarioH) || 0;
+    const m = parseInt(rec.straordinarioM) || 0;
+    return h + (m/60);
+  }
+  return parseFloat(rec.straordinarioOre) || 0;
+}
+function fmtOreMin(decimalOre){
+  const totMin = Math.round(decimalOre * 60);
+  const h = Math.floor(totMin / 60);
+  const m = totMin % 60;
+  return `${h}h ${pad(m)}m`;
+}
 
 function showBanner(msg, isErr){
   const b = document.getElementById('banner');
@@ -308,7 +357,7 @@ function initAppData(){
 
   db.ref('ore').on('value', snap=>{
     oreCache = snap.val() || {};
-    renderDettaglio();
+    renderAll();
   }, err=>{
     showBanner("Errore nel caricamento da Firebase: " + err.message, true);
   });
@@ -350,12 +399,24 @@ document.getElementById('nextMonth').addEventListener('click', ()=>{
   renderAll();
 });
 
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click', ()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    currentTab = t.dataset.tab;
+    document.getElementById('content-dettaglio').classList.toggle('hidden', currentTab !== 'dettaglio');
+    document.getElementById('content-riepilogo').classList.toggle('hidden', currentTab !== 'riepilogo');
+    renderAll();
+  });
+});
+
 function updatePeriodLabel(){
   document.getElementById('currentPeriod').textContent = `${MESI[currentMese]} ${currentAnno}`;
 }
 function renderAll(){
   updatePeriodLabel();
-  renderDettaglio();
+  if(currentTab === 'dettaglio') renderDettaglio();
+  else renderRiepilogo();
 }
 
 /* =========================================================================
@@ -368,7 +429,7 @@ function renderDettaglio(){
   const mese = currentMese, anno = currentAnno;
   const nDays = daysInMonth(mese, anno);
 
-  let totOre = 0, totStraord = 0, totScomputo = 0;
+  let totOre = 0, totStraord = 0, totScomputoMaturato = 0, totScomputoUtilizzato = 0;
   const totCodici = {cod331:0, cod338:0, cod354:0, cod386:0, cod387:0};
 
   for(let d=1; d<=nDays; d++){
@@ -376,9 +437,10 @@ function renderDettaglio(){
     const rec = oreCache[dateStr] || {};
     const ore = calcOre(rec.entrata, rec.uscita);
     totOre += ore;
-    const straordOre = parseFloat(rec.straordinarioOre) || 0;
+    const straordOre = straordDecimal(rec);
     if(rec.straordinarioTipo === 'Straordinario') totStraord += straordOre;
-    if(rec.straordinarioTipo === 'Scomputo') totScomputo += straordOre;
+    if(rec.straordinarioTipo === 'Scomputo maturato') totScomputoMaturato += straordOre;
+    if(rec.straordinarioTipo === 'Scomputo utilizzato') totScomputoUtilizzato += straordOre;
     CODICI.forEach(c => { if(rec[c.key]) totCodici[c.key]++; });
 
     const dow = new Date(anno, mese, d).getDay();
@@ -407,8 +469,11 @@ function renderDettaglio(){
       <td><select class="cell-select" data-field="assenza" data-date="${dateStr}">${assenzaOptions}</select></td>
       <td>
         <div class="straord-cell">
-          <select class="cell-select" style="width:100px;" data-field="straordinarioTipo" data-date="${dateStr}">${straordTipoOptions}</select>
-          <input type="number" step="0.25" min="0" placeholder="ore" data-field="straordinarioOre" data-date="${dateStr}" value="${rec.straordinarioOre||''}">
+          <select class="cell-select" style="width:120px;" data-field="straordinarioTipo" data-date="${dateStr}">${straordTipoOptions}</select>
+          <div class="straord-hm">
+            <input type="number" min="0" placeholder="0" data-field="straordinarioH" data-date="${dateStr}" value="${rec.straordinarioH||''}"><span>h</span>
+            <input type="number" min="0" max="59" placeholder="0" data-field="straordinarioM" data-date="${dateStr}" value="${rec.straordinarioM||''}"><span>m</span>
+          </div>
         </div>
       </td>
       ${codiceCells}
@@ -419,8 +484,9 @@ function renderDettaglio(){
 
   document.getElementById('summaryCards').innerHTML = `
     <div class="card"><div class="label">Ore effettive (mese)</div><div class="value">${fmtOre(totOre)}</div></div>
-    <div class="card"><div class="label">Straordinario</div><div class="value">${fmtOre(totStraord)}</div></div>
-    <div class="card"><div class="label">Scomputo</div><div class="value">${fmtOre(totScomputo)}</div></div>
+    <div class="card"><div class="label">Straordinario</div><div class="value">${fmtOreMin(totStraord)}</div></div>
+    <div class="card"><div class="label">Scomputo maturato</div><div class="value">${fmtOreMin(totScomputoMaturato)}</div></div>
+    <div class="card"><div class="label">Scomputo utilizzato</div><div class="value">${fmtOreMin(totScomputoUtilizzato)}</div></div>
     <div class="card"><div class="label">331 Galleria</div><div class="value">${totCodici.cod331}</div></div>
     <div class="card"><div class="label">338 FF</div><div class="value">${totCodici.cod338}</div></div>
     <div class="card"><div class="label">354 Mancato pasto</div><div class="value">${totCodici.cod354}</div></div>
@@ -442,6 +508,54 @@ function renderDettaglio(){
 }
 
 /* =========================================================================
+   6bis. TAB RIEPILOGO — conteggio turni + saldo scomputo
+   ========================================================================= */
+function renderRiepilogo(){
+  const mese = currentMese, anno = currentAnno;
+  const nDays = daysInMonth(mese, anno);
+
+  // Conteggio turni e totali straordinario/scomputo per il mese selezionato
+  const conteggioTurni = {};
+  let totStraordMese = 0, totMaturatoMese = 0, totUtilizzatoMese = 0;
+  for(let d=1; d<=nDays; d++){
+    const dateStr = `${anno}-${pad(mese+1)}-${pad(d)}`;
+    const rec = oreCache[dateStr];
+    if(!rec) continue;
+    if(rec.turno){ conteggioTurni[rec.turno] = (conteggioTurni[rec.turno]||0) + 1; }
+    const straordOre = straordDecimal(rec);
+    if(rec.straordinarioTipo === 'Straordinario') totStraordMese += straordOre;
+    if(rec.straordinarioTipo === 'Scomputo maturato') totMaturatoMese += straordOre;
+    if(rec.straordinarioTipo === 'Scomputo utilizzato') totUtilizzatoMese += straordOre;
+  }
+
+  // Saldo scomputo cumulativo: su TUTTI i dati salvati (non solo il mese),
+  // perché è un monte ore che si accumula e si consuma nel tempo.
+  let totMaturatoGlobale = 0, totUtilizzatoGlobale = 0;
+  Object.keys(oreCache).forEach(dateStr=>{
+    const rec = oreCache[dateStr];
+    const straordOre = straordDecimal(rec);
+    if(rec.straordinarioTipo === 'Scomputo maturato') totMaturatoGlobale += straordOre;
+    if(rec.straordinarioTipo === 'Scomputo utilizzato') totUtilizzatoGlobale += straordOre;
+  });
+  const saldoGlobale = totMaturatoGlobale - totUtilizzatoGlobale;
+
+  document.getElementById('riepilogoCards').innerHTML = `
+    <div class="card"><div class="label">Straordinario (mese)</div><div class="value">${fmtOreMin(totStraordMese)}</div></div>
+    <div class="card"><div class="label">Scomputo maturato (mese)</div><div class="value">${fmtOreMin(totMaturatoMese)}</div></div>
+    <div class="card"><div class="label">Scomputo utilizzato (mese)</div><div class="value">${fmtOreMin(totUtilizzatoMese)}</div></div>
+    <div class="card"><div class="label">Saldo scomputo (totale)</div><div class="value ${saldoGlobale>=0?'saldo-pos':'saldo-neg'}">${fmtOreMin(saldoGlobale)}</div></div>
+  `;
+
+  const tbody = document.getElementById('tbodyTurniRiepilogo');
+  const turniUsati = Object.keys(conteggioTurni).sort((a,b)=> conteggioTurni[b]-conteggioTurni[a]);
+  if(turniUsati.length === 0){
+    tbody.innerHTML = `<tr><td colspan="2" style="text-align:center;color:var(--muted);">Nessun turno registrato in questo mese.</td></tr>`;
+  }else{
+    tbody.innerHTML = turniUsati.map(t => `<tr><td>${t}</td><td style="text-align:center;">${conteggioTurni[t]}</td></tr>`).join('');
+  }
+}
+
+/* =========================================================================
    7. EXPORT CSV
    ========================================================================= */
 window.exportCSV = function(){
@@ -450,7 +564,7 @@ window.exportCSV = function(){
 
   const rows = [[`Monitoraggio Ore — Periodo: ${MESI[mese]} ${anno}`]];
   rows.push([]);
-  rows.push(["Giorno","Entrata","Uscita","Ore","Turno","Assenza","Tipo Straord/Scomputo","Ore Straord/Scomputo","331 Galleria","338 FF","354 Mancato pasto","386 Guida treno","387 Guida auto","Note"]);
+  rows.push(["Giorno","Entrata","Uscita","Ore","Turno","Assenza","Tipo Straord/Scomputo","Ore","Minuti","331 Galleria","338 FF","354 Mancato pasto","386 Guida treno","387 Guida auto","Note"]);
 
   let totOre = 0;
   for(let d=1; d<=nDays; d++){
@@ -460,7 +574,7 @@ window.exportCSV = function(){
     totOre += ore;
     rows.push([
       `${pad(d)}/${pad(mese+1)}/${anno}`, rec.entrata || '', rec.uscita || '', fmtOre(ore),
-      rec.turno || '', rec.assenza || '', rec.straordinarioTipo || '', rec.straordinarioOre || '',
+      rec.turno || '', rec.assenza || '', rec.straordinarioTipo || '', rec.straordinarioH || '', rec.straordinarioM || '',
       rec.cod331 ? 'X' : '', rec.cod338 ? 'X' : '', rec.cod354 ? 'X' : '', rec.cod386 ? 'X' : '', rec.cod387 ? 'X' : '',
       rec.note || ''
     ]);
